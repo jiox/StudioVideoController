@@ -1128,6 +1128,67 @@ def mark_obs_consumed(media_dir: str, obs_path: str):
         _save_import_state(media_dir, state)
 
 
+# ── Camera-usage bookkeeping (which camera(s) a take was recorded with) ──────
+#
+# The live "record via UI" pipeline already knows in real time whether OBS
+# and/or the Lumix were used for a take, since it triggers both itself. The
+# SD-card import flow doesn't have that luxury — it can run long after the
+# recording, matching card clips to OBS files purely by timestamp — so
+# without a persistent record it can't tell "OBS was deliberately not used
+# for this take" apart from "OBS was supposed to run but silently failed".
+# A single append-only JSON log, keyed by wall-clock stop time and matched
+# with the same tolerance as the OBS-pairing itself, is enough to resolve
+# that ambiguity without a per-take sidecar file for every clip.
+_CAMERA_USAGE_LOG_FILENAME = ".camera_usage_log.json"
+_CAMERA_USAGE_LOG_MAX_ENTRIES = 500
+
+
+def _load_camera_usage_log(media_dir: str) -> list[dict]:
+    path = os.path.join(media_dir, _CAMERA_USAGE_LOG_FILENAME)
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def log_camera_usage(media_dir: str, use_obs: bool, use_lumix: bool):
+    """Call once per take, when recording actually stops."""
+    log = _load_camera_usage_log(media_dir)
+    log.append({
+        "time":       datetime.now(timezone.utc).isoformat(),
+        "use_obs":    use_obs,
+        "use_lumix":  use_lumix,
+    })
+    log = log[-_CAMERA_USAGE_LOG_MAX_ENTRIES:]
+    os.makedirs(media_dir, exist_ok=True)
+    path = os.path.join(media_dir, _CAMERA_USAGE_LOG_FILENAME)
+    with open(path, "w") as f:
+        json.dump(log, f, indent=2)
+
+
+def _obs_expected_for(media_dir: str, when: datetime) -> bool:
+    """
+    Was OBS enabled for the take whose stop-time is closest to *when*?
+    Defaults to True (no log entry, or nothing close enough) so takes
+    recorded before this feature existed keep the old "skip if no OBS
+    match" safety net rather than silently going single-camera.
+    """
+    log = _load_camera_usage_log(media_dir)
+    best, best_delta = None, None
+    for entry in log:
+        try:
+            t = datetime.fromisoformat(entry["time"])
+        except Exception:
+            continue
+        delta = abs((when - t).total_seconds())
+        if best_delta is None or delta < best_delta:
+            best, best_delta = entry, delta
+    if best is None or best_delta > SD_IMPORT_MAX_TIME_DELTA:
+        return True
+    return best.get("use_obs", True)
+
+
 def import_from_sdcard(
     session_name: str,
     take_start: int,
@@ -1190,7 +1251,14 @@ def import_from_sdcard(
             if best_delta is None or delta < best_delta:
                 best, best_delta = obs_clip, delta
 
-        if best is None or best_delta > SD_IMPORT_MAX_TIME_DELTA:
+        have_obs_match = best is not None and best_delta <= SD_IMPORT_MAX_TIME_DELTA
+
+        # No timestamp-close OBS clip — normally that means OBS was running
+        # but failed to produce a matching file, so we skip and leave it for
+        # a retry. But if the camera-usage log says OBS was deliberately
+        # disabled for a take around this time, this card clip was always
+        # meant to stand alone — import it as a single-camera take instead.
+        if not have_obs_match and _obs_expected_for(media_dir, sd_clip["datetime"]):
             reason = (f"closest OBS clip is {best_delta:.0f}s away"
                       if best is not None else "no unconsumed OBS clips")
             print(f"[sdcard] ⚠ Skipping {sd_clip['filename']} — {reason}")
@@ -1208,10 +1276,9 @@ def import_from_sdcard(
         shutil.copy2(sd_clip["path"], dest)
         print(f"[sdcard] ✓ Copied {sd_clip['filename']} → {dest}")
 
-        clip_list = [
-            {"path": best["path"], "label": "OBS",      "timecode": decode_ltc(best["path"])},
-            {"path": dest,         "label": "Lumix S5", "timecode": decode_ltc(dest)},
-        ]
+        clip_list = [{"path": dest, "label": "Lumix S5", "timecode": decode_ltc(dest)}]
+        if have_obs_match:
+            clip_list.insert(0, {"path": best["path"], "label": "OBS", "timecode": decode_ltc(best["path"])})
 
         fcpxml_path = None
         if any(c["timecode"] for c in clip_list):
@@ -1219,16 +1286,18 @@ def import_from_sdcard(
             if not fcpxml_path:
                 print(f"[sdcard] ✗ FCPXML generation failed for take {take_num:02d}")
         else:
-            print(f"[sdcard] ✗ LTC decode failed on both clips for take {take_num:02d}")
+            clip_word = "both clips" if have_obs_match else "the clip"
+            print(f"[sdcard] ✗ LTC decode failed on {clip_word} for take {take_num:02d}")
 
-        consumed_obs.add(best["path"])
+        if have_obs_match:
+            consumed_obs.add(best["path"])
         already_imported.add(sd_clip["filename"])
 
         take_info = {
             "take":            take_num,
             "lumix_filename":  sd_clip["filename"],
-            "obs_filename":    os.path.basename(best["path"]),
-            "time_delta_s":    round(best_delta, 1),
+            "obs_filename":    os.path.basename(best["path"]) if have_obs_match else None,
+            "time_delta_s":    round(best_delta, 1) if have_obs_match else None,
             "fcpxml":          fcpxml_path,
         }
 

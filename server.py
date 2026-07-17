@@ -41,6 +41,17 @@ _sdcard_only_latest   = True    # SD import: only the most recent new clip by de
                                  # ("record several takes, only the last matters"); unchecking
                                  # imports every new clip found on the card
 
+# Camera selection — which camera(s) to actually use for the *next* recording.
+# At least one must stay True; enforced in the /camera/*/toggle endpoints.
+_use_obs   = True
+_use_lumix = True
+
+# Snapshot of the above, taken when a recording actually starts — record_stop()
+# and the pipeline must use what was active for THIS take, not whatever the
+# toggles happen to say by the time the take finishes.
+_active_use_obs   = True
+_active_use_lumix = True
+
 # ── Session / take tracking ──────────────────────────────────────────────────
 _SESSION_NAME_FILE = os.path.join(MEDIA_DIR, ".last_session_name.txt")
 
@@ -290,17 +301,22 @@ RECORD_START_LTC_SETTLE_S = 3.0  # Cubase must be playing LTC before the camera/
 
 def record_start(trigger_cubase: bool = False) -> tuple[bool, str]:
     """Returns (ok, reason) — reason is only meaningful when ok is False."""
-    global _recording
+    global _recording, _active_use_obs, _active_use_lumix
     with _lock:
         if _recording:
             if trigger_cubase:
                 _cubase_record()
             return True, ""                # already recording, nothing to do
 
+        use_obs, use_lumix = _use_obs, _use_lumix
+        if not use_obs and not use_lumix:
+            return False, "Enable at least one camera (OBS or Lumix S5) before recording"
+
         # Pre-flight: don't trigger Cubase or the camera at all if OBS won't
         # actually produce a clip — a silent OBS failure previously left the
         # UI reporting a successful take with no way to multicam-sync it.
-        if not _obs_is_connected():
+        # Skipped entirely when this take isn't using OBS at all.
+        if use_obs and not _obs_is_connected():
             msg = "OBS not connected — recording aborted (no OBS clip would be produced)"
             print(f"[obs] ✗ {msg}")
             return False, msg
@@ -309,14 +325,21 @@ def record_start(trigger_cubase: bool = False) -> tuple[bool, str]:
             _cubase_record()               # start Cubase (and its LTC generator) first...
             time.sleep(RECORD_START_LTC_SETTLE_S)  # ...and let it settle before the camera starts
 
-        _cam("recmode")                    # ensure camera is in record mode
-        ok = _cam("video_recstart")
-        if ok:
-            _recording = True
-            print("▶  REC started")
+        if use_lumix:
+            _cam("recmode")                    # ensure camera is in record mode
+            ok = _cam("video_recstart")
+            if not ok:
+                return False, "Camera did not confirm recording start — check WiFi connection"
+        else:
+            ok = True
+
+        _active_use_obs, _active_use_lumix = use_obs, use_lumix
+        _recording = True
+        mode = "OBS + Lumix" if use_obs and use_lumix else ("OBS only" if use_obs else "Lumix only")
+        print(f"▶  REC started ({mode})")
+        if use_obs:
             threading.Thread(target=_obs_start, daemon=True).start()
-            return True, ""
-        return False, "Camera did not confirm recording start — check WiFi connection"
+        return True, ""
 
 
 def record_stop(trigger_cubase: bool = False) -> bool:
@@ -326,7 +349,9 @@ def record_stop(trigger_cubase: bool = False) -> bool:
             if trigger_cubase:
                 _cubase_stop()
             return True                    # already stopped, nothing to do
-        ok = _cam("video_recstop")
+
+        use_obs, use_lumix = _active_use_obs, _active_use_lumix
+        ok = _cam("video_recstop") if use_lumix else True
         if ok:
             _recording = False
             _take_number += 1
@@ -334,10 +359,13 @@ def record_stop(trigger_cubase: bool = False) -> bool:
             session_snap = _session_name
             print(f"■  REC stopped — session '{session_snap}' take {take_snap}")
 
+            from resolve_helper import log_camera_usage
+            log_camera_usage(MEDIA_DIR, use_obs, use_lumix)
+
             # Stop OBS and collect its output path, then run the full pipeline
             def _stop_and_pipeline():
-                obs_path = _obs_stop()
-                _run_pipeline(session_snap, take_snap, obs_path)
+                obs_path = _obs_stop() if use_obs else None
+                _run_pipeline(session_snap, take_snap, obs_path, use_obs, use_lumix)
 
             threading.Thread(target=_stop_and_pipeline, daemon=True).start()
             if trigger_cubase:
@@ -353,16 +381,23 @@ def _set_pipeline(state: str, message: str):
     print(f"[pipeline] [{state}] {message}")
 
 
-def _run_pipeline(session_name: str, take_num: int, obs_path: str | None):
+def _run_pipeline(
+    session_name: str,
+    take_num: int,
+    obs_path: str | None,
+    use_obs: bool = True,
+    use_lumix: bool = True,
+):
     """
-    Background thread: download Lumix clip, decode LTC on both clips,
-    then create the multicam take in DaVinci Resolve.
+    Background thread: download Lumix clip, decode LTC on each clip actually
+    used for this take, then create the (multicam, or single-angle if only
+    one camera was used) take in DaVinci Resolve.
     """
     from resolve_helper import decode_ltc, download_lumix_clip, build_fcpxml, open_in_resolve, mark_obs_consumed
 
     _pipeline["take"] = take_num
 
-    if not _download_from_camera:
+    if use_lumix and not _download_from_camera:
         _set_pipeline(
             "idle",
             "S5 WiFi download disabled — insert the SD card and use IMPORT SD CARD",
@@ -375,24 +410,30 @@ def _run_pipeline(session_name: str, take_num: int, obs_path: str | None):
     clips = []
 
     # ── OBS clip ─────────────────────────────────────────────────────────
-    if obs_path and os.path.exists(obs_path):
-        clips.append({"path": obs_path, "label": "OBS", "timecode": None})
-    else:
-        print(f"[pipeline] ⚠ OBS file not found: {obs_path}")
+    if use_obs:
+        if obs_path and os.path.exists(obs_path):
+            clips.append({"path": obs_path, "label": "OBS", "timecode": None})
+        else:
+            print(f"[pipeline] ⚠ OBS file not found: {obs_path}")
 
     # ── Lumix clip (WiFi download) ────────────────────────────────────────
-    _set_pipeline("downloading", "Downloading S5 footage over WiFi …")
+    if use_lumix:
+        _set_pipeline("downloading", "Downloading S5 footage over WiFi …")
 
-    def _lumix_progress(done, total):
-        if total:
-            pct = int(done / total * 100)
-            _set_pipeline("downloading", f"Downloading S5 footage … {pct}%")
+        def _lumix_progress(done, total):
+            if total:
+                pct = int(done / total * 100)
+                _set_pipeline("downloading", f"Downloading S5 footage … {pct}%")
 
-    lumix_path = download_lumix_clip(CAMERA_IP, session_dir, progress_cb=_lumix_progress)
-    if lumix_path:
-        clips.append({"path": lumix_path, "label": "Lumix S5", "timecode": None})
-    else:
-        _set_pipeline("error", "S5 download failed — check WiFi connection")
+        lumix_path = download_lumix_clip(CAMERA_IP, session_dir, progress_cb=_lumix_progress)
+        if lumix_path:
+            clips.append({"path": lumix_path, "label": "Lumix S5", "timecode": None})
+        else:
+            _set_pipeline("error", "S5 download failed — check WiFi connection")
+            return
+
+    if not clips:
+        _set_pipeline("error", "No camera clips available for this take")
         return
 
     # ── Decode LTC from each clip ─────────────────────────────────────────
@@ -413,7 +454,7 @@ def _run_pipeline(session_name: str, take_num: int, obs_path: str | None):
 
     if fcpxml_path:
         open_in_resolve(fcpxml_path, session_name=session_name, media_dir=MEDIA_DIR)
-        if obs_path:
+        if use_obs and obs_path:
             mark_obs_consumed(MEDIA_DIR, obs_path)
         _set_pipeline("done", f"Take {take_num:02d} ready — opening in Resolve ✓")
     else:
@@ -739,6 +780,16 @@ _HTML = f"""<!DOCTYPE html>
 <button id="sdcard-btn" onclick="importSdCard()">IMPORT SD CARD</button>
 
 <div class="toggle-wrap">
+  <input type="checkbox" class="toggle-checkbox" id="obs-toggle" checked onchange="toggleUseObs()">
+  <label class="toggle-label" for="obs-toggle">Use OBS</label>
+</div>
+
+<div class="toggle-wrap">
+  <input type="checkbox" class="toggle-checkbox" id="lumix-toggle" checked onchange="toggleUseLumix()">
+  <label class="toggle-label" for="lumix-toggle">Use Lumix S5</label>
+</div>
+
+<div class="toggle-wrap">
   <input type="checkbox" class="toggle-checkbox" id="download-toggle" onchange="toggleDownload()">
   <label class="toggle-label" for="download-toggle">Download from S5 over WiFi</label>
 </div>
@@ -880,6 +931,34 @@ function applySdcardBusy(busy) {{
   btn.disabled = busy;
 }}
 
+function applyUseObs(enabled) {{
+  document.getElementById('obs-toggle').checked = enabled;
+}}
+
+async function toggleUseObs() {{
+  try {{
+    const r = await fetch('/camera/obs/toggle', {{ method: 'POST' }});
+    const d = await r.json();
+    applyUseObs(d.use_obs);
+    applyUseLumix(d.use_lumix);
+    if (d.error) {{ alert(d.error); }}
+  }} catch(e) {{ console.error(e); }}
+}}
+
+function applyUseLumix(enabled) {{
+  document.getElementById('lumix-toggle').checked = enabled;
+}}
+
+async function toggleUseLumix() {{
+  try {{
+    const r = await fetch('/camera/lumix/toggle', {{ method: 'POST' }});
+    const d = await r.json();
+    applyUseObs(d.use_obs);
+    applyUseLumix(d.use_lumix);
+    if (d.error) {{ alert(d.error); }}
+  }} catch(e) {{ console.error(e); }}
+}}
+
 function applyDownloadEnabled(enabled) {{
   document.getElementById('download-toggle').checked = enabled;
 }}
@@ -937,6 +1016,8 @@ async function poll() {{
     applySdcardBusy(d.pipeline && !['idle', 'done', 'error'].includes(d.pipeline.state));
     applyDownloadEnabled(d.download_enabled);
     applySdcardOnlyLatest(d.sdcard_only_latest);
+    applyUseObs(d.use_obs);
+    applyUseLumix(d.use_lumix);
     applyCameraStatus(d.camera_reachable, d.camera_battery, d.camera_video_remaining_min);
 
     // Keep session input in sync if server has a name set
@@ -1021,6 +1102,46 @@ def api_download_toggle():
         state = _download_from_camera
     print(f"[download] {'ENABLED — will download S5 footage over WiFi' if state else 'DISABLED — use SD card import instead'}")
     return jsonify({"download_enabled": state})
+
+
+@app.route("/camera/obs/toggle", methods=["POST"])
+def api_camera_obs_toggle():
+    global _use_obs
+    error = None
+    with _lock:
+        new_state = not _use_obs
+        if not new_state and not _use_lumix:
+            error = "At least one camera must stay enabled"
+        else:
+            _use_obs = new_state
+    if error:
+        print(f"[camera] ⚠ {error} (OBS)")
+    else:
+        print(f"[camera] OBS {'enabled' if _use_obs else 'disabled'} for recording")
+    resp = {"use_obs": _use_obs, "use_lumix": _use_lumix}
+    if error:
+        resp["error"] = error
+    return jsonify(resp)
+
+
+@app.route("/camera/lumix/toggle", methods=["POST"])
+def api_camera_lumix_toggle():
+    global _use_lumix
+    error = None
+    with _lock:
+        new_state = not _use_lumix
+        if not new_state and not _use_obs:
+            error = "At least one camera must stay enabled"
+        else:
+            _use_lumix = new_state
+    if error:
+        print(f"[camera] ⚠ {error} (Lumix)")
+    else:
+        print(f"[camera] Lumix S5 {'enabled' if _use_lumix else 'disabled'} for recording")
+    resp = {"use_obs": _use_obs, "use_lumix": _use_lumix}
+    if error:
+        resp["error"] = error
+    return jsonify(resp)
 
 
 @app.route("/sdcard/only_latest/toggle", methods=["POST"])
@@ -1134,6 +1255,8 @@ def api_status():
         "pipeline":          _pipeline,
         "download_enabled":  _download_from_camera,
         "sdcard_only_latest": _sdcard_only_latest,
+        "use_obs":           _use_obs,
+        "use_lumix":         _use_lumix,
         "camera_battery":             _camera_state["battery"],
         "camera_video_remaining_min": _camera_state["video_remaining_min"],
         "camera_reachable":           _camera_state["reachable"],
