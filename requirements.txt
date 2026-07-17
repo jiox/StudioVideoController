@@ -1,0 +1,4 @@
+flask>=3.0
+requests>=2.31
+python-rtmidi>=1.5
+obsws-python>=1.7
