@@ -483,6 +483,7 @@ _HTML = f"""<!DOCTYPE html>
     align-items: center;
     justify-content: center;
     min-height: 100vh;
+    padding-bottom: 24px;
     -webkit-tap-highlight-color: transparent;
     user-select: none;
     gap: 0;
@@ -553,26 +554,59 @@ _HTML = f"""<!DOCTYPE html>
     cursor: default;
   }}
 
-  /* ── Toggle checkboxes (download, sdcard only-latest, ...) ── */
-  .toggle-wrap {{
+  /* ── Toggle rows (OBS, Lumix, download, sdcard only-latest, ...) ──
+     The whole row is the tap target (min. 44px tall, full label width),
+     not just the tiny native checkbox — much easier to hit on a phone. */
+  .toggle-row {{
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-top: 18px;
-  }}
-  .toggle-checkbox {{
-    width: 15px;
-    height: 15px;
-    accent-color: #0a84ff;
-    cursor: pointer;
-  }}
-  .toggle-label {{
-    font-size: 10px;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    color: #444;
+    justify-content: space-between;
+    width: 240px;
+    min-height: 44px;
+    padding: 4px 2px;
     cursor: pointer;
     user-select: none;
+  }}
+  .toggle-row-label {{
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: #555;
+  }}
+  .toggle-input {{
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }}
+  .toggle-switch {{
+    position: relative;
+    flex-shrink: 0;
+    width: 46px;
+    height: 27px;
+    background: #232323;
+    border: 1px solid #2a2a2a;
+    border-radius: 100px;
+    transition: background .2s, border-color .2s;
+  }}
+  .toggle-switch::after {{
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 21px;
+    height: 21px;
+    background: #666;
+    border-radius: 50%;
+    transition: transform .2s, background .2s;
+  }}
+  .toggle-input:checked + .toggle-switch {{
+    background: rgba(10,132,255,0.25);
+    border-color: #0a84ff;
+  }}
+  .toggle-input:checked + .toggle-switch::after {{
+    transform: translateX(19px);
+    background: #0a84ff;
   }}
 
   /* ── Status ── */
@@ -737,16 +771,14 @@ _HTML = f"""<!DOCTYPE html>
   #pipeline-msg.error  {{ color: #ff3b30; }}
 
   #cam-addr {{
-    position: fixed;
-    bottom: 28px;
+    margin-top: 8px;
     font-size: 10px;
     color: #1e1e1e;
     letter-spacing: 1px;
   }}
 
   #cam-status {{
-    position: fixed;
-    bottom: 44px;
+    margin-top: 28px;
     font-size: 10px;
     letter-spacing: 1px;
     color: #444;
@@ -771,33 +803,37 @@ _HTML = f"""<!DOCTYPE html>
 <div id="btn-wrap"><button id="btn" onclick="toggleRec()"></button></div>
 <div id="label">TAP TO RECORD</div>
 
+<button id="sdcard-btn" onclick="importSdCard()">IMPORT SD CARD</button>
+
 <!-- Post-production pipeline status -->
 <div id="pipeline-wrap">
   <div id="pipeline-bar-bg"><div id="pipeline-bar"></div></div>
   <div id="pipeline-msg"></div>
 </div>
 
-<button id="sdcard-btn" onclick="importSdCard()">IMPORT SD CARD</button>
+<label class="toggle-row">
+  <span class="toggle-row-label">Use OBS</span>
+  <input type="checkbox" class="toggle-input" id="obs-toggle" checked onchange="toggleUseObs()">
+  <span class="toggle-switch"></span>
+</label>
 
-<div class="toggle-wrap">
-  <input type="checkbox" class="toggle-checkbox" id="obs-toggle" checked onchange="toggleUseObs()">
-  <label class="toggle-label" for="obs-toggle">Use OBS</label>
-</div>
+<label class="toggle-row">
+  <span class="toggle-row-label">Use Lumix S5</span>
+  <input type="checkbox" class="toggle-input" id="lumix-toggle" checked onchange="toggleUseLumix()">
+  <span class="toggle-switch"></span>
+</label>
 
-<div class="toggle-wrap">
-  <input type="checkbox" class="toggle-checkbox" id="lumix-toggle" checked onchange="toggleUseLumix()">
-  <label class="toggle-label" for="lumix-toggle">Use Lumix S5</label>
-</div>
+<label class="toggle-row">
+  <span class="toggle-row-label">Download from S5 over WiFi</span>
+  <input type="checkbox" class="toggle-input" id="download-toggle" onchange="toggleDownload()">
+  <span class="toggle-switch"></span>
+</label>
 
-<div class="toggle-wrap">
-  <input type="checkbox" class="toggle-checkbox" id="download-toggle" onchange="toggleDownload()">
-  <label class="toggle-label" for="download-toggle">Download from S5 over WiFi</label>
-</div>
-
-<div class="toggle-wrap">
-  <input type="checkbox" class="toggle-checkbox" id="sdcard-only-latest-toggle" checked onchange="toggleSdcardOnlyLatest()">
-  <label class="toggle-label" for="sdcard-only-latest-toggle">Only latest take from SD card</label>
-</div>
+<label class="toggle-row">
+  <span class="toggle-row-label">Only latest take from SD card</span>
+  <input type="checkbox" class="toggle-input" id="sdcard-only-latest-toggle" checked onchange="toggleSdcardOnlyLatest()">
+  <span class="toggle-switch"></span>
+</label>
 
 <div id="cam-status"></div>
 <div id="cam-addr">CAM {CAMERA_IP}</div>
