@@ -6,7 +6,7 @@ Lumix S5 Camera Controller
 - Cubase transport → virtual MIDI port; lumix_transport.js binds notes to it directly (no manual Cubase mapping)
 - Camera control  → Lumix WiFi HTTP API (video_recstart / video_recstop)
 ────────────────────────────────────────────────────────────────────
-Edit CAMERA_IP below, then run:  python server.py
+Copy .env.example to .env and fill in your camera's IP, then run:  python server.py
 """
 
 from __future__ import annotations
@@ -18,16 +18,22 @@ import threading
 import time
 import socket
 import requests
+from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
+load_dotenv()
+
 # ─── CONFIG ─────────────────────────────────────────────────────────────────
-CAMERA_IP    = "192.168.178.122"   # ← S5's IP address
-PORT         = 5050                # web server port
-OBS_HOST     = "localhost"         # OBS WebSocket host
-OBS_PORT     = 4455                # OBS WebSocket port (Tools → WebSocket Server Settings)
-OBS_PASSWORD = ""                  # leave empty if no password set in OBS
-MEDIA_DIR    = os.path.expanduser("~/Movies/LumixSessions")  # where S5 clips are saved
-OBS_RECORDING_DIR = os.path.expanduser("~/Movies")            # OBS's own output folder
+# All of these can be overridden via .env (see .env.example) instead of
+# editing this file directly — keeps machine-specific values (camera IP,
+# OBS password, ...) out of source control.
+CAMERA_IP    = os.environ.get("CAMERA_IP", "192.168.1.100")   # ← S5's IP address
+PORT         = int(os.environ.get("PORT", "5050"))            # web server port
+OBS_HOST     = os.environ.get("OBS_HOST", "localhost")        # OBS WebSocket host
+OBS_PORT     = int(os.environ.get("OBS_PORT", "4455"))        # OBS WebSocket port (Tools → WebSocket Server Settings)
+OBS_PASSWORD = os.environ.get("OBS_PASSWORD", "")              # leave empty if no password set in OBS
+MEDIA_DIR    = os.path.expanduser(os.environ.get("MEDIA_DIR", "~/Movies/LumixSessions"))        # where S5 clips are saved
+OBS_RECORDING_DIR = os.path.expanduser(os.environ.get("OBS_RECORDING_DIR", "~/Movies"))          # OBS's own output folder
 # ────────────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
@@ -554,6 +560,63 @@ _HTML = f"""<!DOCTYPE html>
     cursor: default;
   }}
 
+  /* ── Setup checklist (collapsible) ── */
+  #checklist-toggle {{
+    border: 1.5px solid #2a2a2a;
+    background: transparent;
+    color: #555;
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding: 8px 20px;
+    border-radius: 100px;
+    cursor: pointer;
+    margin-bottom: 18px;
+    -webkit-appearance: none;
+  }}
+  #checklist-toggle:active {{ opacity: 0.6; }}
+  #checklist-toggle.open {{
+    color: #ff9500;
+    border-color: #ff9500;
+  }}
+  #checklist-panel {{
+    display: none;
+    width: 280px;
+    margin-bottom: 24px;
+    padding: 6px 4px;
+    border: 1.5px solid #1e1e1e;
+    border-radius: 14px;
+  }}
+  #checklist-panel.open {{ display: block; }}
+  .checklist-item {{
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    min-height: 44px;
+    padding: 6px 10px;
+    cursor: pointer;
+    user-select: none;
+  }}
+  .checklist-item input[type="checkbox"] {{
+    margin-top: 2px;
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    accent-color: #ff9500;
+    cursor: pointer;
+  }}
+  .checklist-item span {{
+    font-size: 12px;
+    line-height: 1.5;
+    color: #999;
+  }}
+  .checklist-item input[type="checkbox"]:checked ~ span {{
+    color: #444;
+    text-decoration: line-through;
+  }}
+
   /* ── Toggle rows (OBS, Lumix, download, sdcard only-latest, ...) ──
      The whole row is the tap target (min. 44px tall, full label width),
      not just the tiny native checkbox — much easier to hit on a phone. */
@@ -788,6 +851,35 @@ _HTML = f"""<!DOCTYPE html>
 </head>
 <body>
 
+<!-- Setup checklist -->
+<button id="checklist-toggle" onclick="toggleChecklist()">☑ CHECKLIST</button>
+<div id="checklist-panel">
+  <label class="checklist-item">
+    <input type="checkbox" data-checklist-id="0">
+    <span>1. LUMIX in den Videomodus stellen</span>
+  </label>
+  <label class="checklist-item">
+    <input type="checkbox" data-checklist-id="1">
+    <span>2. Brennweite und manuellen Fokus einstellen</span>
+  </label>
+  <label class="checklist-item">
+    <input type="checkbox" data-checklist-id="2">
+    <span>3. Mit dem WiFi-Netz verbinden</span>
+  </label>
+  <label class="checklist-item">
+    <input type="checkbox" data-checklist-id="3">
+    <span>4. Timecode-Kabel an den Mikrofoneingang anschließen</span>
+  </label>
+  <label class="checklist-item">
+    <input type="checkbox" data-checklist-id="4">
+    <span>5. In Cubase prüfen: Timecode-Kanal nicht gemutet, Pegel liegt an der Kamera an</span>
+  </label>
+  <label class="checklist-item">
+    <input type="checkbox" data-checklist-id="5">
+    <span>6. Richtiges MIDI-Eingabegerät in Cubase für Remote Control von der UI eingestellt</span>
+  </label>
+</div>
+
 <!-- Session name input -->
 <div id="session-wrap">
   <input id="session-input" type="text" placeholder="Session Name" maxlength="40"
@@ -845,6 +937,33 @@ let pipelineState = 'idle';
 
 // ── Pipeline status steps → progress bar width ──────────────────────────────
 const PIPELINE_STEPS = {{ idle:0, downloading:25, decoding:60, resolve:85, done:100, error:100 }};
+
+// ── Setup checklist (collapsible, checked state persisted locally) ──────────
+const CHECKLIST_STORAGE_KEY = 'lumix-checklist-checked';
+
+function loadChecklistState() {{
+  let checked = [];
+  try {{ checked = JSON.parse(localStorage.getItem(CHECKLIST_STORAGE_KEY)) || []; }} catch(e) {{}}
+  document.querySelectorAll('.checklist-item input[type="checkbox"]').forEach(cb => {{
+    cb.checked = checked.includes(cb.dataset.checklistId);
+  }});
+}}
+
+function saveChecklistState() {{
+  const checked = Array.from(document.querySelectorAll('.checklist-item input[type="checkbox"]:checked'))
+    .map(cb => cb.dataset.checklistId);
+  localStorage.setItem(CHECKLIST_STORAGE_KEY, JSON.stringify(checked));
+}}
+
+function toggleChecklist() {{
+  document.getElementById('checklist-toggle').classList.toggle('open');
+  document.getElementById('checklist-panel').classList.toggle('open');
+}}
+
+document.querySelectorAll('.checklist-item input[type="checkbox"]').forEach(cb => {{
+  cb.addEventListener('change', saveChecklistState);
+}});
+loadChecklistState();
 
 function applyArmed(a) {{
   armed = a;

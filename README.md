@@ -94,7 +94,7 @@ brew install ffmpeg ltc-tools
 ### Python packages
 
 ```bash
-pip3 install flask requests obsws-python --break-system-packages
+pip3 install flask requests obsws-python python-rtmidi python-dotenv --break-system-packages
 ```
 
 Or from the project directory:
@@ -117,24 +117,30 @@ pip3 install -r requirements.txt --break-system-packages
 
 The camera connects to your home WiFi automatically on power-up once configured. Make sure the camera is in **Creative Video mode** (the cine camera icon on the mode dial) — this is required for the `video_recstart` command to work.
 
-### 2. Set the camera IP in server.py
+### 2. Set the camera IP
 
-Open `server.py` and update the config block at the top:
+Copy `.env.example` to `.env` and fill in your camera's IP from step 1:
 
-```python
-CAMERA_IP    = "192.168.178.122"   # ← your camera's IP from step 1
-PORT         = 5050                # web server port (change if already in use)
-OBS_HOST     = "localhost"
-OBS_PORT     = 4455
-OBS_PASSWORD = ""                  # set if you configured a password in OBS
-MEDIA_DIR    = os.path.expanduser("~/Movies/LumixSessions")  # where S5 clips are saved
+```bash
+cp .env.example .env
 ```
+
+```
+CAMERA_IP=192.168.1.100   # ← your camera's IP from step 1
+PORT=5050                 # web server port (change if already in use)
+OBS_HOST=localhost
+OBS_PORT=4455
+OBS_PASSWORD=             # set if you configured a password in OBS
+MEDIA_DIR=~/Movies/LumixSessions   # where S5 clips are saved
+```
+
+`.env` is gitignored, so machine-specific values never end up in source control.
 
 ### 3. Enable OBS WebSocket
 
 In OBS: **Tools → WebSocket Server Settings → Enable WebSocket server**
 
-Leave the port as 4455 and the password blank unless you changed them (update `server.py` if you did).
+Leave the port as 4455 and the password blank unless you changed them (update `.env` if you did).
 
 ### 4. Install the Cubase MIDI Remote script (one-time)
 
@@ -186,7 +192,7 @@ cat > ~/Library/LaunchAgents/com.lumix.controller.plist << 'EOF'
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/python3</string>
-    <string>/Users/jiox/Documents/obsidian/Studio/Studio/LumixController/server.py</string>
+    <string>/Users/yourname/path/to/LumixController/server.py</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -373,7 +379,7 @@ LumixController/
 ### Camera
 
 **"Cannot reach camera"**
-- Confirm `CAMERA_IP` in `server.py` matches the camera (check MENU → Setup → Wi-Fi → connection status)
+- Confirm `CAMERA_IP` in `.env` matches the camera (check MENU → Setup → Wi-Fi → connection status)
 - Camera must be in **Creative Video mode**
 - The WiFi icon must be visible in the camera status bar
 
@@ -428,15 +434,15 @@ LumixController/
 
 ## Configuration reference
 
-All config is at the top of `server.py`:
+All config is set via `.env` (copy `.env.example` to get started; falls back to the defaults below if a variable isn't set):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CAMERA_IP` | `"192.168.178.122"` | S5 IP address on your network |
+| `CAMERA_IP` | `192.168.1.100` | S5 IP address on your network |
 | `PORT` | `5050` | Flask server port |
-| `OBS_HOST` | `"localhost"` | OBS WebSocket host |
+| `OBS_HOST` | `localhost` | OBS WebSocket host |
 | `OBS_PORT` | `4455` | OBS WebSocket port |
-| `OBS_PASSWORD` | `""` | OBS WebSocket password (blank = none) |
+| `OBS_PASSWORD` | (empty) | OBS WebSocket password (blank = none) |
 | `MEDIA_DIR` | `~/Movies/LumixSessions` | Where S5 clips are downloaded |
 
 LTC channel and FPS are in `resolve_helper.py`:

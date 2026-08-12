@@ -14,7 +14,7 @@ A Python server on your MacBook that:
 
 ```bash
 brew install ffmpeg ltc-tools
-pip3 install flask requests obsws-python --break-system-packages
+pip3 install flask requests obsws-python python-rtmidi python-dotenv --break-system-packages
 ```
 
 ---
@@ -37,12 +37,16 @@ Put the camera in **Creative Video mode** (the cine camera icon on the mode dial
 
 ---
 
-## Step 3 — Set the camera IP in server.py
+## Step 3 — Set the camera IP
 
-Open `server.py` and update line 19:
+Copy `.env.example` to `.env` and set your camera's IP:
 
-```python
-CAMERA_IP = "192.168.178.122"   # ← replace with your camera's actual IP
+```bash
+cp .env.example .env
+```
+
+```
+CAMERA_IP=192.168.1.100   # ← replace with your camera's actual IP
 ```
 
 ---
@@ -51,7 +55,7 @@ CAMERA_IP = "192.168.178.122"   # ← replace with your camera's actual IP
 
 In OBS: **Tools → WebSocket Server Settings → Enable WebSocket server**
 
-Default port is 4455 with no password — matches the server defaults. If you set a password, update `OBS_PASSWORD` in `server.py`.
+Default port is 4455 with no password — matches the server defaults. If you set a password, update `OBS_PASSWORD` in `.env`.
 
 ---
 
@@ -136,7 +140,7 @@ After every take:
 ## Troubleshooting
 
 **"Cannot reach camera"**
-- Check `CAMERA_IP` in `server.py`
+- Check `CAMERA_IP` in `.env`
 - Camera must be in Creative Video mode
 - WiFi icon must be visible in the camera status bar
 
@@ -176,7 +180,7 @@ cat > ~/Library/LaunchAgents/com.lumix.controller.plist << 'EOF'
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/python3</string>
-    <string>/Users/jiox/Documents/obsidian/Studio/Studio/LumixController/server.py</string>
+    <string>/Users/yourname/path/to/LumixController/server.py</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
