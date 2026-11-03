@@ -54,7 +54,8 @@ A Python-based recording controller that synchronises a **Panasonic Lumix S5**, 
 | File | Role |
 |------|------|
 | `server.py` | Central Flask server. Camera control, OBS control, ARM gate, session tracking, pipeline orchestration, iPhone UIs (video page `/`, audio page `/audio`), Motion Control CC pipeline |
-| `lumix_transport.js` | Cubase MIDI Remote script. Triggers Record/Stop via a virtual MIDI port, and hosts three CC-bound Quick Control knobs for iPhone Motion Control |
+| `audio.html` | The separate audio/Cubase phone page served at `/audio` (record, play, retake, markers, motion control) |
+| `lumix_transport.js` | Cubase MIDI Remote script. Triggers transport and Cubase commands via a virtual MIDI port, and hosts three CC-bound Quick Control knobs for iPhone Motion Control |
 | `resolve_helper.py` | Post-production pipeline. LTC decode (ffmpeg + ltcdump), S5 clip download, FCPXML generation |
 | `requirements.txt` | Python dependencies |
 
@@ -292,7 +293,7 @@ After every take, a background thread runs the following sequence:
 
 ### 1. OBS stop
 
-`obsws-python` calls `stop_record()` and captures the output file path returned by OBS.
+`obsws-python` calls `stop_record()` and captures the output file path returned by OBS. The file is then **moved** from OBS's own output folder into the take folder as `OBS_TakeNN.<ext>`, next to the S5 clip.
 
 ### 2. S5 clip download
 
@@ -341,6 +342,27 @@ DaVinci Resolve imports the FCPXML as a new timeline. The multicam clip appears 
 
 ---
 
+## Audio page
+
+A second phone UI at `https://<mac-ip>:5050/audio` (linked at the top of the main page, with a back link to it) for recording audio/MIDI tracks in Cubase while you're away from the laptop — e.g. e-drums or guitar. It talks to Cubase only; no cameras, OBS or pipeline are involved, and it's locked while a video take is running.
+
+| Control | What it does |
+|---------|--------------|
+| **● RECORD / ■ STOP** | Starts Cubase recording; becomes Stop while recording |
+| **▶ Play / ■ Stop** | Starts playback; becomes Stop while playing or recording |
+| **↺ Retake** | Stop, then Undo of the take just recorded |
+| **Loop / Metronome / Count-in** | Toggle cycle, click and pre-count (Cubase command *Transport → Precount On*) |
+| **⚑ Marker, ◀ Marker, Marker ▶** | Insert a marker at the cursor / jump to the previous or next marker |
+| **💾 Projekt speichern** | Save the Cubase project |
+| **Checklist** | Short setup reminder (stored per device) |
+| **MOTION CONTROL** | Tilt-to-MIDI-CC panel, see [Motion Control](#motion-control) |
+
+**Limits worth knowing:**
+- The link is one-way (server → Cubase over MIDI). Cubase can't report its state back, so the page only knows what *it* sent: the Play/Stop label and the recording state can drift if you also use Cubase directly (e.g. playback reaching the end of the project). Loop, Metronome and Count-in are plain toggles without a state indicator.
+- Count-in is a toggle, so it can't be forced "on" — set it up once in Cubase.
+- **Retake** returns to the take's start only if *Return to Start Position on Stop* is enabled in Cubase.
+- The script binds MIDI notes 20–31 (channel 1); after updating `lumix_transport.js`, rescan in Cubase's MIDI Remote Manager.
+
 ## Motion Control
 
 Turns the iPhone into a wireless 3-axis MIDI controller: tilting/rotating the phone streams live orientation data to Cubase, mapped to MIDI CC on three axes.
@@ -376,6 +398,13 @@ All endpoints accept and return JSON. Called by the iPhone UI and by `lumix_tran
 | `GET`  | `/pipeline/status` | Get pipeline state — see states below |
 | `GET`  | `/status` | Full server state (recording, armed, session, take, pipeline) |
 | `GET`  | `/` | iPhone web UI (HTML) |
+| `GET`  | `/audio` | Audio/Cubase phone UI (HTML) |
+| `GET`  | `/audio/status` | `{recording, playing, video_recording}` |
+| `POST` | `/audio/record` | Start Cubase recording (refused while a video take runs) |
+| `POST` | `/audio/play` | Start Cubase playback |
+| `POST` | `/audio/stop` | Stop Cubase |
+| `POST` | `/audio/retake` | Stop, then undo the last recording |
+| `POST` | `/audio/action/<name>` | One of `cycle`, `metronome`, `precount`, `marker`, `prev_marker`, `next_marker`, `save` |
 
 Motion Control uses a separate **WebSocket** (not plain HTTP JSON): `wss://<mac-ip>:5050/motion/ws` — each text message is `{"gamma_deg": <float>, "beta_deg": <float>, "alpha_deg": <float>, "max_deg": <float, optional>}`, streamed continuously rather than request/response. See [Motion Control](#motion-control).
 
@@ -397,6 +426,7 @@ Motion Control uses a separate **WebSocket** (not plain HTTP JSON): `wss://<mac-
 ```
 LumixController/
 ├── server.py              # Main Flask server
+├── audio.html             # Audio/Cubase phone page (/audio)
 ├── lumix_transport.js     # Cubase MIDI Remote script
 ├── resolve_helper.py      # LTC decode + download + FCPXML generation
 ├── requirements.txt       # Python dependencies
@@ -407,7 +437,7 @@ LumixController/
 └── Song A/
     └── Take 01/
         ├── S5001234.MP4                  # S5 footage (downloaded)
-        ├── 2024-01-01 12-00-00.mkv      # OBS recording
+        ├── OBS_Take01.mkv               # OBS recording (moved here from OBS's folder)
         └── Song A — Take 01.fcpxml      # DaVinci Resolve multicam
 ```
 
