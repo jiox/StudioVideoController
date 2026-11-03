@@ -3,3 +3,4 @@ requests>=2.31
 python-rtmidi>=1.5
 obsws-python>=1.7
 python-dotenv>=1.0
+flask-sock>=0.7

@@ -10,17 +10,17 @@ A Python-based recording controller that synchronises a **Panasonic Lumix S5**, 
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          Mac (this machine)                         │
 │                                                                     │
-│   ┌──────────┐   MIDI Remote JS   ┌────────────────────────────┐   │
+│   ┌──────────┐   HTTP callbacks   ┌────────────────────────────┐   │
 │   │  Cubase  │ ─────────────────► │                            │   │
-│   └──────────┘  HTTP callbacks    │      server.py             │   │
+│   └──────────┘  (started/stopped) │      server.py             │   │
 │                                   │      (Flask :5050)         │   │
 │   ┌──────────┐   WebSocket API    │                            │   │
 │   │   OBS    │ ◄────────────────► │  • ARM gate                │   │
 │   └──────────┘                    │  • Session / take tracking │   │
 │                                   │  • Post-production pipeline│   │
-│   ┌──────────┐   HTTP long-poll   └────────────┬───────────────┘   │
+│   ┌──────────┐   virtual MIDI     └────────────┬───────────────┘   │
 │   │  Cubase  │ ◄──────────────────────────────┘                    │
-│   └──────────┘  (mStart/mStop.increment())                         │
+│   └──────────┘  (Record/Stop notes, Motion Control CC)              │
 └────────────────────────────────────┬────────────────────────────────┘
                                      │ WiFi HTTP API
                           ┌──────────▼──────────┐
@@ -28,7 +28,7 @@ A Python-based recording controller that synchronises a **Panasonic Lumix S5**, 
                           │   192.168.x.x:80    │
                           └─────────────────────┘
 
-  iPhone  ──── Safari ────► http://<mac-ip>:5050   (record button + status)
+  iPhone  ──── Safari ────► https://<mac-ip>:5050   (video recording UI at `/`, audio/Cubase UI with motion control at `/audio`)
 ```
 
 ### Recording flow
@@ -53,16 +53,14 @@ A Python-based recording controller that synchronises a **Panasonic Lumix S5**, 
 
 | File | Role |
 |------|------|
-| `server.py` | Central Flask server. Camera control, OBS control, ARM gate, session tracking, pipeline orchestration, iPhone UI |
-| `lumix_transport.js` | Cubase MIDI Remote script. Two-way transport sync over plain HTTP — detects transport play/stop and POSTs to Flask, and long-polls Flask for start/stop commands to write back to Cubase's own transport. No MIDI ports |
+| `server.py` | Central Flask server. Camera control, OBS control, ARM gate, session tracking, pipeline orchestration, iPhone UIs (video page `/`, audio page `/audio`), Motion Control CC pipeline |
+| `lumix_transport.js` | Cubase MIDI Remote script. Triggers Record/Stop via a virtual MIDI port, and hosts three CC-bound Quick Control knobs for iPhone Motion Control |
 | `resolve_helper.py` | Post-production pipeline. LTC decode (ffmpeg + ltcdump), S5 clip download, FCPXML generation |
 | `requirements.txt` | Python dependencies |
 
 ### Key design decisions
 
-**No MIDI at all.** Cubase ↔ server communication is entirely HTTP, both directions, via the Cubase MIDI Remote JavaScript API (despite the name, the script doesn't need to touch any MIDI ports). The script runs inside Cubase and makes direct HTTP calls to the Flask server — no IAC Driver, no third-party MIDI router, no virtual port, no Generic Remote note mapping.
-
-**Long-polling for server → Cubase control.** The MIDI Remote API has no `setTimeout`/`setInterval`, so there's no native way to run a polling loop from inside a script. Instead, `lumix_transport.js` holds an HTTP GET open against `/cubase/wait` (the server blocks on a `queue.Queue.get(timeout=25)` until there's a command, or the timeout elapses); the moment a response arrives, the script writes to Cubase's transport via `mHostAccess.mTransport.mValue.mStart/mStop.increment()` and immediately reopens the next long-poll from within that same callback — that request-chaining is what stands in for a loop. This needs Flask's `threaded=True` (a long-poll blocking for up to 25s would otherwise stall every other request).
+**Virtual MIDI port for Cubase transport control.** `require('http')` and `require('child_process')` both throw inside the Cubase MIDI Remote script sandbox, so HTTP isn't viable from that side. Instead, `server.py` opens a virtual MIDI port named `"Lumix Controller"` (via `python-rtmidi`) at startup; `lumix_transport.js` binds Note 20/21 to Record/Stop directly via `mMidiBinding` + `makeValueBinding` — no IAC Driver, no Generic Remote mapping, just install the script once. The same port now also carries three MIDI CC channels (21/22/23) for Motion Control, bound to Cubase Quick Controls.
 
 **ARM gate.** The ARM toggle decouples "Cubase is playing" from "record the camera". You can freely scrub and play back in Cubase without triggering the camera. Only when ARM is enabled does Cubase transport control the camera.
 
@@ -94,7 +92,7 @@ brew install ffmpeg ltc-tools
 ### Python packages
 
 ```bash
-pip3 install flask requests obsws-python python-rtmidi python-dotenv --break-system-packages
+pip3 install flask requests obsws-python python-rtmidi python-dotenv flask-sock --break-system-packages
 ```
 
 Or from the project directory:
@@ -132,6 +130,9 @@ OBS_HOST=localhost
 OBS_PORT=4455
 OBS_PASSWORD=             # set if you configured a password in OBS
 MEDIA_DIR=~/Movies/LumixSessions   # where S5 clips are saved
+SSL_CERT_FILE=            # only needed for Motion Control — see step 5
+SSL_KEY_FILE=
+MOTION_MAX_DEG=45         # ± tilt range mapped to MIDI CC 0-127
 ```
 
 `.env` is gitignored, so machine-specific values never end up in source control.
@@ -150,10 +151,23 @@ Copy `lumix_transport.js` to:
 ~/Documents/Cubase MIDI Remote/Driver Scripts/Local/
 ```
 
-In Cubase, open the **MIDI Remote Manager** (bottom zone → MIDI Remote tab) and click the rescan button. The script activates automatically. That's the entire setup — no MIDI ports, no Generic Remote mapping, no start-order dependency between `server.py` and Cubase. Transport sync works both ways purely over HTTP:
+In Cubase, open the **MIDI Remote Manager** (bottom zone → MIDI Remote tab) and click the rescan button. The script activates automatically. That's the entire setup — no IAC Driver, no Generic Remote mapping, no start-order dependency between `server.py` and Cubase:
 
-- Cubase → server: the script detects transport play/stop and POSTs to the server.
-- Server → Cubase: the script long-polls the server and writes to Cubase's own transport (`mStart`/`mStop.increment()`) the moment a command arrives.
+- Cubase → server: the script detects transport play/stop and POSTs to the server (`/cubase/started`/`/cubase/stopped`).
+- Server → Cubase: `server.py` opens a virtual MIDI port (`"Lumix Controller"`) and sends Record/Stop as MIDI notes, which the script binds directly to Cubase's transport. The same port also carries the Motion Control CC data (see step 5).
+
+### 5. Enable HTTPS for Motion Control (optional)
+
+Skip this if you don't need the iPhone-tilt-to-MIDI-CC feature — everything else works over plain HTTP. iOS Safari only exposes the motion-sensor permission API on a secure connection, so Motion Control needs HTTPS:
+
+```bash
+brew install mkcert
+mkcert -install
+mkdir certs
+mkcert -key-file certs/lumix-key.pem -cert-file certs/lumix.pem <mac-lan-ip> localhost
+```
+
+Set `SSL_CERT_FILE=certs/lumix.pem` and `SSL_KEY_FILE=certs/lumix-key.pem` in `.env`. Then AirDrop `$(mkcert -CAROOT)/rootCA.pem` to the iPhone, install the profile (**Settings → General → VPN & Device Management**), and enable full trust for it (**Settings → General → About → Certificate Trust Settings**) — full trust is an easy-to-miss extra step. `certs/` is gitignored. See [SETUP.md](SETUP.md) for the full walkthrough.
 
 ---
 
@@ -170,13 +184,15 @@ You'll see:
 ──────────────────────────────────────────────────────
   Lumix S5 Controller
 ──────────────────────────────────────────────────────
-  Camera IP  :  192.168.178.122
-  iPhone URL :  http://192.168.1.10:5050
+  Camera IP  :  192.168.1.100
+  iPhone URL :  https://192.168.1.10:5050
+  HTTPS      :  ON  (cert: certs/lumix.pem)
   (Make sure Mac, iPhone, and camera are on the same WiFi)
 ──────────────────────────────────────────────────────
 
 [obs]  ✓ Connected to OBS WebSocket at localhost:4455
 ```
+(`HTTPS: OFF` and an `http://` URL if you skipped step 5 — everything except Motion Control still works.)
 
 Open the iPhone URL in Safari. Optional: **Share → Add to Home Screen** for a standalone icon.
 
@@ -213,7 +229,7 @@ Check logs with: `tail -f /tmp/lumix_controller.log`
 
 ### Before your session
 
-1. Start `server.py` (or confirm it's running via launchd) — any order relative to Cubase, no MIDI port to race against
+1. Start `server.py` (or confirm it's running via launchd) — it creates the `Lumix Controller` MIDI port that Cubase connects to
 2. Open Cubase and OBS
 
 ### Per-take
@@ -229,7 +245,7 @@ Check logs with: `tail -f /tmp/lumix_controller.log`
 
 ### Manual recording (without Cubase)
 
-Tap the record button on the iPhone at any time. ARM is not required for manual use. The iPhone button also starts/stops Cubase transport via the long-poll mechanism in `lumix_transport.js`.
+Tap the record button on the iPhone at any time. ARM is not required for manual use. The iPhone button also starts/stops Cubase transport via MIDI notes sent to the virtual `Lumix Controller` port (bound to Cubase's transport in `lumix_transport.js`).
 
 ### ARM behaviour
 
@@ -260,11 +276,13 @@ Tap the record button on the iPhone at any time. ARM is not required for manual 
 │                                 │
 │  ████████████░░░░  DECODING…    │  ← pipeline progress after stop
 │                                 │
-│       CAM 192.168.178.122       │
+│       CAM 192.168.1.100       │
 └─────────────────────────────────┘
 ```
 
 The page polls the server every 1.5 seconds (every 0.8 seconds while pipeline is running) so state stays in sync across devices.
+
+The collapsible **MOTION CONTROL** panel (Enable / Calibrate / sensitivity slider / live α/β/γ readout) lives on the separate Audio page (`/audio`), not here — see [Motion Control](#motion-control) below. Unlike the rest of the UI, motion data is pushed over its own WebSocket, not the `/status` poll loop.
 
 ---
 
@@ -323,6 +341,25 @@ DaVinci Resolve imports the FCPXML as a new timeline. The multicam clip appears 
 
 ---
 
+## Motion Control
+
+Turns the iPhone into a wireless 3-axis MIDI controller: tilting/rotating the phone streams live orientation data to Cubase, mapped to MIDI CC on three axes.
+
+- **Requires HTTPS** ([one-time setup](#5-enable-https-for-motion-control-optional)) — iOS Safari only exposes the `DeviceOrientationEvent` sensor API (and its permission prompt) on a secure connection.
+- The browser reads `alpha`/`beta`/`gamma` (yaw/pitch/roll) from the `deviceorientation` event, computes deltas from a user-set calibration zero-point, throttles to ~20 Hz, and streams them over a WebSocket at `wss://<mac-ip>:5050/motion/ws`.
+- `server.py` maps each axis's calibrated degrees (clamped to a configurable ± range, default 45°, adjustable live via the UI's sensitivity slider or `MOTION_MAX_DEG` in `.env`) linearly to 0–127 and sends it as MIDI CC on the same virtual `"Lumix Controller"` port used for transport control:
+
+  | Axis | Meaning | MIDI CC (channel 1) |
+  |------|---------|----------------------|
+  | γ (gamma) | roll — left/right tilt | 21 |
+  | β (beta)  | pitch — front/back tilt | 22 |
+  | α (alpha) | yaw — rotation around vertical axis | 23 |
+
+- `lumix_transport.js` binds each CC to a knob wired to Cubase's **Quick Controls** (slots 0–2), so you assign whatever channel/plugin parameter you want directly inside Cubase — no server-side reconfiguration needed.
+- The WebSocket reconnects automatically (~2s backoff) if the connection drops (WiFi hiccup, phone screen lock); the iOS permission grant itself doesn't need to be re-requested until the page is reloaded.
+
+---
+
 ## HTTP API
 
 All endpoints accept and return JSON. Called by the iPhone UI and by `lumix_transport.js` in Cubase.
@@ -339,6 +376,8 @@ All endpoints accept and return JSON. Called by the iPhone UI and by `lumix_tran
 | `GET`  | `/pipeline/status` | Get pipeline state — see states below |
 | `GET`  | `/status` | Full server state (recording, armed, session, take, pipeline) |
 | `GET`  | `/` | iPhone web UI (HTML) |
+
+Motion Control uses a separate **WebSocket** (not plain HTTP JSON): `wss://<mac-ip>:5050/motion/ws` — each text message is `{"gamma_deg": <float>, "beta_deg": <float>, "alpha_deg": <float>, "max_deg": <float, optional>}`, streamed continuously rather than request/response. See [Motion Control](#motion-control).
 
 ### Pipeline states
 
@@ -390,11 +429,15 @@ LumixController/
 ### Cubase
 
 **Cubase transport doesn't trigger camera, or iPhone button doesn't start Cubase**
-- MIDI Remote Manager: `lumix_transport.js` must show as active (no red error)
+- MIDI Remote Manager: `lumix_transport.js` must show as active (no red error), and the detected port pair must be named `Lumix Controller`
 - ARM must be enabled (orange) on the iPhone
-- Check Cubase's script console for `[Lumix]` lines — `poll error` / `longPoll setup failed` means the script can't reach `server.py`; confirm `SERVER` at the top of `lumix_transport.js` matches `PORT` in `server.py`, and that the server is actually running (any order relative to Cubase — there's no MIDI port to race against anymore)
-- Check the terminal — every transport event from Cubase logs `[cubase] transport started/stopped`, and every command sent to Cubase logs `[cubase] ▶/■ ... queued for next long-poll`
-- If `server.py` was restarted while Cubase was open, the script's long-poll may still be waiting on the old process — reactivating the script in the MIDI Remote Manager (or just waiting up to 25s for the poll to time out and reopen) resolves it
+- Check the terminal for `[midi] ✓ Virtual MIDI port 'Lumix Controller' created` at startup — if it's missing/failed instead, `python-rtmidi` couldn't open the port (check the error, e.g. a stale port from a previous run)
+- If `server.py` was restarted while Cubase was open, rescan devices in the MIDI Remote Manager so Cubase reconnects to the newly created virtual port
+
+**Motion Control: permission prompt doesn't appear, or Cubase parameter doesn't move**
+- URL must start with `https://` — iOS silently withholds the motion permission API on plain HTTP (see [Motion Control](#motion-control))
+- Confirm the terminal shows `[motion] client connected` when you tap Enable; if not, the WebSocket never reached the server
+- A Quick Control slot must be assigned to an actual parameter in Cubase — the knobs in `lumix_transport.js` feed Quick Controls generically, they don't target a parameter by themselves
 
 ### OBS
 
@@ -407,10 +450,10 @@ LumixController/
 
 **"S5 download failed"** / **"No clips found on camera"**
 - Camera must remain on WiFi after recording stops (it does by default)
-- Test connectivity: `curl http://192.168.178.122/cam.cgi?mode=getstate` should return `<result>ok</result>`
+- Test connectivity: `curl http://192.168.1.100/cam.cgi?mode=getstate` should return `<result>ok</result>`
 - Test content listing (UPnP `ContentDirectory` `Browse` on `ObjectID=0`):
   ```
-  curl -X POST http://192.168.178.122:60606/Server0/CDS_control \
+  curl -X POST http://192.168.1.100:60606/Server0/CDS_control \
     -H 'Content-Type: text/xml; charset="utf-8"' \
     -H 'SOAPACTION: "urn:schemas-upnp-org:service:ContentDirectory:1#Browse"' \
     --data '<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:Browse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><ObjectID>0</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag><Filter>*</Filter><StartingIndex>0</StartingIndex><RequestedCount>0</RequestedCount><SortCriteria></SortCriteria></u:Browse></s:Body></s:Envelope>'
@@ -444,6 +487,9 @@ All config is set via `.env` (copy `.env.example` to get started; falls back to 
 | `OBS_PORT` | `4455` | OBS WebSocket port |
 | `OBS_PASSWORD` | (empty) | OBS WebSocket password (blank = none) |
 | `MEDIA_DIR` | `~/Movies/LumixSessions` | Where S5 clips are downloaded |
+| `SSL_CERT_FILE` | (empty) | Path to TLS cert — required for Motion Control (HTTPS); server runs plain HTTP if unset |
+| `SSL_KEY_FILE` | (empty) | Path to TLS key, paired with `SSL_CERT_FILE` |
+| `MOTION_MAX_DEG` | `45` | Default ± tilt range (degrees) mapped to MIDI CC 0–127; also adjustable live via the UI sensitivity slider |
 
 LTC channel and FPS are in `resolve_helper.py`:
 

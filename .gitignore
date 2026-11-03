@@ -9,3 +9,6 @@ __pycache__/
 # startup — bakes in this machine's absolute paths, so it's a build artifact,
 # not source. Gets regenerated locally the first time server.py runs.
 resolve_scripts/
+
+# mkcert-generated local TLS cert/key for HTTPS (Motion Control) — machine-specific
+certs/

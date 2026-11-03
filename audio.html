@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Cubase Audio</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0d0d0d;
+    color: #fff;
+    font-family: -apple-system, 'Helvetica Neue', sans-serif;
+    min-height: 100vh;
+    padding: 16px 16px 32px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+  }
+
+  .wrap { width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 14px; }
+
+  .top { display: flex; justify-content: space-between; align-items: center; }
+  .pill {
+    border: 1.5px solid #2a2a2a;
+    background: transparent;
+    color: #555;
+    font: 700 10px/1 inherit;
+    font-family: inherit;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding: 10px 18px;
+    border-radius: 100px;
+    text-decoration: none;
+    cursor: pointer;
+    -webkit-appearance: none;
+  }
+  .pill:active { opacity: 0.6; }
+  .pill.open { color: #ff9500; border-color: #ff9500; }
+
+  #status { text-align: center; font-size: 12px; letter-spacing: 3px; text-transform: uppercase; color: #444; }
+  #status.rec { color: #ff3b30; }
+
+  #rec-btn {
+    width: 100%;
+    height: 34vh;
+    min-height: 180px;
+    border-radius: 28px;
+    border: 2px solid #3a1210;
+    background: #1a0d0c;
+    color: #ff3b30;
+    font-family: inherit;
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: 6px;
+    -webkit-appearance: none;
+    transition: background .2s, border-color .2s, color .2s;
+  }
+  #rec-btn:active { opacity: 0.7; }
+  #rec-btn.rec { background: #ff3b30; border-color: #ff3b30; color: #fff; }
+  #rec-btn:disabled { opacity: 0.35; }
+
+  #countin-hint { text-align: center; font-size: 11px; letter-spacing: 1px; color: #7a4700; }
+  #err { text-align: center; font-size: 12px; color: #ff9500; min-height: 16px; }
+
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .act {
+    min-height: 64px;
+    border-radius: 16px;
+    border: 1.5px solid #2a2a2a;
+    background: #151515;
+    color: #ccc;
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 600;
+    -webkit-appearance: none;
+  }
+  .act:active { background: #262626; }
+  .act.flash { border-color: #30d158; color: #30d158; }
+  .act.stop { color: #fff; }
+
+  #checklist-panel { display: none; flex-direction: column; gap: 4px; }
+  #checklist-panel.open { display: flex; }
+  .checklist-item {
+    display: flex; align-items: flex-start; gap: 12px;
+    min-height: 44px; padding: 10px 4px;
+    font-size: 13px; line-height: 1.4; color: #aaa;
+  }
+  .checklist-item input { width: 22px; height: 22px; flex: none; margin-top: 1px; accent-color: #ff9500; }
+  .checklist-item.done span { color: #444; text-decoration: line-through; }
+  /* ── Motion control (collapsible) ── */
+  #motion-panel {
+    display: none;
+    width: 100%;
+    padding: 14px 12px;
+    border: 1.5px solid #1e1e1e;
+    border-radius: 14px;
+  }
+  #motion-panel.open { display: block; }
+  .motion-enable-btn, .motion-calibrate-btn {
+    display: block;
+    width: 100%;
+    border: 1.5px solid #2a2a2a;
+    background: transparent;
+    color: #555;
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    padding: 10px;
+    border-radius: 100px;
+    cursor: pointer;
+    margin-bottom: 10px;
+    -webkit-appearance: none;
+  }
+  .motion-enable-btn:active, .motion-calibrate-btn:active { opacity: 0.6; }
+  .motion-enable-btn:disabled, .motion-calibrate-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+  #motion-sensitivity {
+    width: 100%;
+    accent-color: #0a84ff;
+    margin: 6px 0 10px;
+  }
+  #motion-readout {
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: #555;
+    text-align: center;
+  }
+
+  .motion-label { display: block; font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: #777; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <a class="pill" href="/">← Video</a>
+    <button class="pill" id="checklist-toggle" onclick="toggleChecklist()">☑ Checklist</button>
+  </div>
+
+  <div id="checklist-panel">
+    <label class="checklist-item"><input type="checkbox" data-id="0"><span>1. Count-in in Cubase aktiv (Metronom-Einstellungen: Vorzähler bei Aufnahme)</span></label>
+    <label class="checklist-item"><input type="checkbox" data-id="1"><span>2. Spur scharf geschaltet, Monitoring an, Pegel stimmt</span></label>
+    <label class="checklist-item"><input type="checkbox" data-id="2"><span>3. Cubase: „Return to Start Position on Stop“ aktiv (für Retake)</span></label>
+    <label class="checklist-item"><input type="checkbox" data-id="3"><span>4. MIDI-Eingabegerät „Lumix Controller“ in Cubase für Remote Control aktiv</span></label>
+  </div>
+
+  <div id="status">Bereit</div>
+
+  <button id="rec-btn" onclick="toggleRec()">● RECORD</button>
+  <div id="countin-hint">Count-in läuft über Cubase – muss dort aktiv sein</div>
+  <div id="err"></div>
+
+  <div class="row">
+    <button class="act stop" id="play-btn" onclick="togglePlay()">▶ Play</button>
+    <button class="act" onclick="retake()">↺ Retake</button>
+  </div>
+  <div class="row">
+    <button class="act" onclick="action('cycle', this)">🔁 Loop an/aus</button>
+    <button class="act" onclick="action('metronome', this)">Metronom an/aus</button>
+    <button class="act" onclick="action('precount', this)">Count-in an/aus</button>
+    <button class="act" onclick="action('marker', this)">⚑ Marker</button>
+  </div>
+  <div class="row">
+    <button class="act" onclick="action('prev_marker', this)">◀ Marker</button>
+    <button class="act" onclick="action('next_marker', this)">Marker ▶</button>
+  </div>
+  <div class="row">
+    <button class="act" onclick="action('save', this)" style="grid-column: 1 / -1">💾 Projekt speichern</button>
+  </div>
+
+  <button class="pill" id="motion-toggle" onclick="toggleMotionPanel()">🎛 MOTION CONTROL</button>
+  <div id="motion-panel">
+    <button id="motion-enable-btn" class="motion-enable-btn" onclick="enableMotion()">ENABLE MOTION CONTROL</button>
+    <button id="motion-calibrate-btn" class="motion-calibrate-btn" onclick="calibrateMotion()" disabled>CALIBRATE (ZERO)</button>
+    <label class="motion-label">SENSITIVITY <span id="motion-sens-val">45°</span></label>
+    <input type="range" id="motion-sensitivity" min="10" max="90" value="45" oninput="onSensitivityChange()">
+    <div id="motion-readout">—</div>
+  </div>
+</div>
+
+<script>
+let rec = false;
+let playing = false;
+
+function render() {
+  document.getElementById('rec-btn').classList.toggle('rec', rec);
+  document.getElementById('rec-btn').textContent = rec ? '■ STOP' : '● RECORD';
+  const st = document.getElementById('status');
+  st.textContent = rec ? 'Aufnahme läuft' : (playing ? 'Wiedergabe' : 'Bereit');
+  st.classList.toggle('rec', rec);
+  document.getElementById('play-btn').textContent = (rec || playing) ? '■ Stop' : '▶ Play';
+}
+
+function showErr(msg) { document.getElementById('err').textContent = msg || ''; }
+
+async function post(url) {
+  showErr('');
+  try {
+    const r = await fetch(url, { method: 'POST' });
+    const d = await r.json();
+    if (d.error) showErr(d.error);
+    await refresh();
+    return d;
+  } catch (e) {
+    showErr('Server nicht erreichbar');
+  }
+}
+
+async function toggleRec() { await post(rec ? '/audio/stop' : '/audio/record'); }
+async function togglePlay() { await post((rec || playing) ? '/audio/stop' : '/audio/play'); }
+async function retake()    { await post('/audio/retake'); }
+
+async function action(name, btn) {
+  const d = await post('/audio/action/' + name);
+  if (d && !d.error && btn) {
+    btn.classList.add('flash');
+    setTimeout(() => btn.classList.remove('flash'), 400);
+  }
+}
+
+async function refresh() {
+  try {
+    const d = await (await fetch('/audio/status')).json();
+    rec = d.recording;
+    playing = d.playing;
+    document.getElementById('rec-btn').disabled = d.video_recording;
+    document.getElementById('play-btn').disabled = d.video_recording;
+    if (d.video_recording) showErr('Video-Take läuft – Audio-Aufnahme gesperrt');
+    render();
+  } catch (e) { /* offline: keep last state */ }
+}
+
+// ── Checklist (persisted per device) ────────────────────────────────────────
+const CL_KEY = 'audio-checklist-checked';
+function loadChecklist() {
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem(CL_KEY) || '[]'); } catch (e) {}
+  document.querySelectorAll('#checklist-panel input').forEach(cb => {
+    cb.checked = saved.includes(cb.dataset.id);
+    cb.parentElement.classList.toggle('done', cb.checked);
+  });
+}
+function saveChecklist() {
+  const ids = [...document.querySelectorAll('#checklist-panel input:checked')].map(cb => cb.dataset.id);
+  try { localStorage.setItem(CL_KEY, JSON.stringify(ids)); } catch (e) {}
+}
+function toggleChecklist() {
+  const open = document.getElementById('checklist-panel').classList.toggle('open');
+  document.getElementById('checklist-toggle').classList.toggle('open', open);
+}
+document.querySelectorAll('#checklist-panel input').forEach(cb => {
+  cb.addEventListener('change', () => {
+    cb.parentElement.classList.toggle('done', cb.checked);
+    saveChecklist();
+  });
+});
+
+// ── Motion control (iPhone tilt → MIDI CC via WebSocket) ────────────────────
+const MOTION_ENABLED_KEY = 'lumix-motion-enabled';
+const MOTION_SENS_KEY = 'lumix-motion-sensitivity';
+let motionEnabled = false;
+let motionMaxDeg = parseFloat(localStorage.getItem(MOTION_SENS_KEY)) || 45;
+let motionZero = { alpha: 0, beta: 0, gamma: 0 };   // calibration reference — session-only
+let lastReading = { alpha: 0, beta: 0, gamma: 0 };
+let lastMotionSend = 0;
+let motionSocket = null;
+let motionReconnectTimer = null;
+
+function toggleMotionPanel() {
+  document.getElementById('motion-toggle').classList.toggle('open');
+  document.getElementById('motion-panel').classList.toggle('open');
+}
+
+function onSensitivityChange() {
+  motionMaxDeg = parseFloat(document.getElementById('motion-sensitivity').value);
+  document.getElementById('motion-sens-val').textContent = motionMaxDeg + '°';
+  localStorage.setItem(MOTION_SENS_KEY, String(motionMaxDeg));
+}
+
+function connectMotionSocket() {
+  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  motionSocket = new WebSocket(proto + location.host + '/motion/ws');
+  motionSocket.onclose = () => {
+    if (motionEnabled) {
+      motionReconnectTimer = setTimeout(connectMotionSocket, 2000);   // WiFi hiccup / screen lock
+    }
+  };
+  motionSocket.onerror = () => motionSocket.close();
+}
+
+async function enableMotion() {
+  try {
+    // 'deviceorientation' is gated by DeviceOrientationEvent's own permission
+    // request on iOS 13+ (NOT DeviceMotionEvent — that gates 'devicemotion').
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      const perm = await DeviceOrientationEvent.requestPermission();  // must run inside the tap handler
+      if (perm !== 'granted') { alert('Motion permission denied'); return; }
+    }
+    window.addEventListener('deviceorientation', onDeviceOrientation);
+    motionEnabled = true;
+    connectMotionSocket();
+    localStorage.setItem(MOTION_ENABLED_KEY, '1');
+    document.getElementById('motion-calibrate-btn').disabled = false;
+    document.getElementById('motion-enable-btn').textContent = 'MOTION CONTROL ON';
+  } catch (e) { console.error(e); alert('Could not enable motion control: ' + e); }
+}
+
+function calibrateMotion() {
+  motionZero = { alpha: lastReading.alpha, beta: lastReading.beta, gamma: lastReading.gamma };
+}
+
+function angleDelta(raw, zero) {
+  // normalizes wraparound for alpha (0-360 compass heading); harmless no-op for beta/gamma
+  return ((raw - zero + 540) % 360) - 180;
+}
+
+function onDeviceOrientation(e) {
+  lastReading = { alpha: e.alpha || 0, beta: e.beta || 0, gamma: e.gamma || 0 };
+  const now = performance.now();
+  if (now - lastMotionSend < 50) return;   // throttle ~20Hz (native events fire ~60Hz)
+  lastMotionSend = now;
+
+  const d = {
+    alpha: angleDelta(lastReading.alpha, motionZero.alpha),
+    beta:  lastReading.beta  - motionZero.beta,
+    gamma: lastReading.gamma - motionZero.gamma,
+  };
+  document.getElementById('motion-readout').textContent =
+    `α ${d.alpha.toFixed(1)}°  β ${d.beta.toFixed(1)}°  γ ${d.gamma.toFixed(1)}°`;
+
+  if (motionSocket && motionSocket.readyState === WebSocket.OPEN) {
+    motionSocket.send(JSON.stringify({ alpha_deg: d.alpha, beta_deg: d.beta, gamma_deg: d.gamma, max_deg: motionMaxDeg }));
+  }
+}
+
+document.getElementById('motion-sensitivity').value = motionMaxDeg;
+document.getElementById('motion-sens-val').textContent = motionMaxDeg + '°';
+if (localStorage.getItem(MOTION_ENABLED_KEY) === '1') {
+  document.getElementById('motion-enable-btn').textContent = 'TAP TO RE-ENABLE (iOS requires this each load)';
+}
+
+
+loadChecklist();
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

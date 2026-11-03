@@ -11,6 +11,7 @@ Copy .env.example to .env and fill in your camera's IP, then run:  python server
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -20,6 +21,7 @@ import socket
 import requests
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
+from flask_sock import Sock
 
 load_dotenv()
 
@@ -34,9 +36,13 @@ OBS_PORT     = int(os.environ.get("OBS_PORT", "4455"))        # OBS WebSocket po
 OBS_PASSWORD = os.environ.get("OBS_PASSWORD", "")              # leave empty if no password set in OBS
 MEDIA_DIR    = os.path.expanduser(os.environ.get("MEDIA_DIR", "~/Movies/LumixSessions"))        # where S5 clips are saved
 OBS_RECORDING_DIR = os.path.expanduser(os.environ.get("OBS_RECORDING_DIR", "~/Movies"))          # OBS's own output folder
+SSL_CERT_FILE = os.environ.get("SSL_CERT_FILE", "")             # HTTPS cert (needed for iPhone Motion Control)
+SSL_KEY_FILE  = os.environ.get("SSL_KEY_FILE", "")              # HTTPS key
+MOTION_MAX_DEG = int(os.environ.get("MOTION_MAX_DEG", "45"))    # default ± tilt range mapped to CC 0-127
 # ────────────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
+sock = Sock(app)
 _lock                 = threading.Lock()
 _recording            = False
 _armed                = False   # when True, Cubase play/stop triggers the camera
@@ -175,6 +181,15 @@ def _poll_camera_state():
 
 NOTE_RECORD = 20   # channel 1 (0-based: 0) — must match lumix_transport.js
 NOTE_STOP   = 21
+NOTE_CYCLE     = 22   # audio page extras — all must match lumix_transport.js
+NOTE_METRONOME = 23
+NOTE_UNDO      = 24
+NOTE_MARKER    = 26
+NOTE_SAVE      = 27
+NOTE_PREV_MARKER = 28
+NOTE_NEXT_MARKER = 29
+NOTE_PLAY        = 30
+NOTE_PRECOUNT    = 31
 
 _midi_out = None   # rtmidi.MidiOut — Python's "out" is Cubase's "in"
 _midi_in  = None   # rtmidi.MidiIn — unused for data, but Cubase's
@@ -195,26 +210,47 @@ def _setup_virtual_midi_out():
         print("[midi]   Cubase transport control disabled; iPhone manual button still works.")
 
 
-def _cubase_record():
+def _send_note(note: int, label: str) -> bool:
     if _midi_out is None:
-        return
+        return False
     try:
-        _midi_out.send_message([0x90, NOTE_RECORD, 0x7F])  # Note On
-        _midi_out.send_message([0x80, NOTE_RECORD, 0x00])  # Note Off
-        print("[cubase] ● record MIDI sent")
+        _midi_out.send_message([0x90, note, 0x7F])  # Note On
+        _midi_out.send_message([0x80, note, 0x00])  # Note Off
+        print(f"[cubase] {label} MIDI sent")
+        return True
     except Exception as e:
-        print(f"[cubase] ✗ record failed: {e}")
+        print(f"[cubase] ✗ {label} failed: {e}")
+        return False
+
+
+def _cubase_record():
+    _send_note(NOTE_RECORD, "● record")
 
 
 def _cubase_stop():
+    _send_note(NOTE_STOP, "■ stop")
+
+
+# ── Motion control (iPhone tilt → MIDI CC → Cubase Quick Controls) ───────────
+CC_AXIS_GAMMA = 21   # channel 1 — roll (left/right tilt)
+CC_AXIS_BETA  = 22   # channel 1 — pitch (front/back tilt)
+CC_AXIS_ALPHA = 23   # channel 1 — yaw (rotation around vertical axis)
+
+
+def _send_cc(cc_num, value):
     if _midi_out is None:
         return
+    value = max(0, min(127, int(round(value))))
     try:
-        _midi_out.send_message([0x90, NOTE_STOP, 0x7F])  # Note On
-        _midi_out.send_message([0x80, NOTE_STOP, 0x00])  # Note Off
-        print("[cubase] ■ stop MIDI sent")
+        _midi_out.send_message([0xB0, cc_num, value])
     except Exception as e:
-        print(f"[cubase] ✗ stop failed: {e}")
+        print(f"[cubase] ✗ CC {cc_num} send failed: {e}")
+
+
+def _map_deg_to_cc(deg, max_deg):
+    max_deg = max(5.0, min(90.0, float(max_deg)))   # sanity-clamp client-supplied range
+    deg = max(-max_deg, min(max_deg, float(deg)))
+    return (deg + max_deg) / (2 * max_deg) * 127
 
 
 # Known real locations found on this machine for Cubase's MIDI Remote local
@@ -416,9 +452,18 @@ def _run_pipeline(
     clips = []
 
     # ── OBS clip ─────────────────────────────────────────────────────────
+    # OBS writes into its own flat output folder (OBS_RECORDING_DIR) under
+    # its own filename — move it into this take's folder alongside the
+    # Lumix clip so everything for a take lives together.
     if use_obs:
         if obs_path and os.path.exists(obs_path):
-            clips.append({"path": obs_path, "label": "OBS", "timecode": None})
+            obs_dest = os.path.join(session_dir, f"OBS_Take{take_num:02d}{os.path.splitext(obs_path)[1]}")
+            try:
+                shutil.move(obs_path, obs_dest)
+                clips.append({"path": obs_dest, "label": "OBS", "timecode": None})
+            except Exception as e:
+                print(f"[pipeline] ⚠ Could not move OBS file into take folder ({e}), using original path")
+                clips.append({"path": obs_path, "label": "OBS", "timecode": None})
         else:
             print(f"[pipeline] ⚠ OBS file not found: {obs_path}")
 
@@ -559,6 +604,21 @@ _HTML = f"""<!DOCTYPE html>
     opacity: 0.4;
     cursor: default;
   }}
+
+  /* ── Link to audio-only page ── */
+  #audio-link {{
+    border: 1.5px solid #2a2a2a;
+    color: #555;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    text-decoration: none;
+    padding: 10px 20px;
+    border-radius: 100px;
+    margin-bottom: 14px;
+  }}
+  #audio-link:active {{ opacity: 0.6; }}
 
   /* ── Setup checklist (collapsible) ── */
   #checklist-toggle {{
@@ -850,6 +910,8 @@ _HTML = f"""<!DOCTYPE html>
 </style>
 </head>
 <body>
+
+<a id="audio-link" href="/audio">🎸 AUDIO RECORDING →</a>
 
 <!-- Setup checklist -->
 <button id="checklist-toggle" onclick="toggleChecklist()">☑ CHECKLIST</button>
@@ -1215,6 +1277,98 @@ def api_stop():
     return jsonify({"ok": ok, "recording": _recording, "armed": _armed})
 
 
+# ── Audio-only recording page (Cubase only, no cameras) ──────────────────────
+
+_audio_rec_start = None   # time.time() when the audio take began, None when idle
+_audio_playing   = False  # phone-side guess: Play pressed and not yet stopped (Cubase doesn't report back)
+
+_AUDIO_ACTIONS = {
+    "cycle":     (NOTE_CYCLE,     "🔁 cycle"),
+    "metronome": (NOTE_METRONOME, "metronome"),
+    "marker":    (NOTE_MARKER,    "⚑ marker"),
+    "save":      (NOTE_SAVE,      "💾 save"),
+    "prev_marker": (NOTE_PREV_MARKER, "◀ prev marker"),
+    "next_marker": (NOTE_NEXT_MARKER, "next marker ▶"),
+    "precount":  (NOTE_PRECOUNT,  "precount toggle"),
+}
+
+
+@app.route("/audio")
+def audio_page():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio.html")
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+@app.route("/audio/status")
+def audio_status():
+    return jsonify({
+        "recording":       _audio_rec_start is not None,
+        "playing":         _audio_playing,
+        "video_recording": _recording,
+    })
+
+
+@app.route("/audio/record", methods=["POST"])
+def audio_record():
+    global _audio_rec_start, _audio_playing
+    if _midi_out is None:
+        return jsonify({"error": "Kein MIDI-Port – Cubase nicht erreichbar"})
+    if _recording:
+        return jsonify({"error": "Video-Take läuft – Audio-Aufnahme gesperrt"})
+    if _audio_rec_start is None:
+        _audio_rec_start = time.time()
+        _audio_playing = False
+        _cubase_record()
+    return jsonify({"ok": True})
+
+
+@app.route("/audio/play", methods=["POST"])
+def audio_play():
+    global _audio_playing
+    if _midi_out is None:
+        return jsonify({"error": "Kein MIDI-Port – Cubase nicht erreichbar"})
+    if _recording:
+        return jsonify({"error": "Video-Take läuft – Audio gesperrt"})
+    if not _audio_playing and _audio_rec_start is None:
+        _audio_playing = True
+        _send_note(NOTE_PLAY, "▶ play")
+    return jsonify({"ok": True})
+
+
+@app.route("/audio/stop", methods=["POST"])
+def audio_stop():
+    global _audio_rec_start, _audio_playing
+    _audio_rec_start = None
+    _audio_playing = False
+    _cubase_stop()
+    return jsonify({"ok": True})
+
+
+@app.route("/audio/retake", methods=["POST"])
+def audio_retake():
+    # Stop, then undo the take just recorded. Returning to the take's start
+    # point relies on Cubase's "Return to Start Position on Stop" preference.
+    global _audio_rec_start, _audio_playing
+    _audio_rec_start = None
+    _audio_playing = False
+    _cubase_stop()
+    time.sleep(0.4)
+    _send_note(NOTE_UNDO, "↶ undo")
+    return jsonify({"ok": True})
+
+
+@app.route("/audio/action/<name>", methods=["POST"])
+def audio_action(name):
+    if name not in _AUDIO_ACTIONS:
+        return jsonify({"error": "Unbekannte Aktion"}), 404
+    if _midi_out is None:
+        return jsonify({"error": "Kein MIDI-Port – Cubase nicht erreichbar"})
+    note, label = _AUDIO_ACTIONS[name]
+    _send_note(note, label)
+    return jsonify({"ok": True})
+
+
 @app.route("/cubase/started", methods=["POST"])
 def api_cubase_started():
     """Called by the Cubase MIDI Remote script when transport starts."""
@@ -1398,6 +1552,28 @@ def api_pipeline_status():
     return jsonify(_pipeline)
 
 
+@sock.route("/motion/ws")
+def motion_ws(ws):
+    print("[motion] client connected")
+    while True:
+        try:
+            raw = ws.receive()   # blocks this connection's thread until a message arrives or it closes
+        except Exception:
+            break
+        if raw is None:
+            break
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        max_deg = data.get("max_deg", MOTION_MAX_DEG)
+        for key, cc in (("gamma_deg", CC_AXIS_GAMMA), ("beta_deg", CC_AXIS_BETA), ("alpha_deg", CC_AXIS_ALPHA)):
+            val = data.get(key)
+            if val is not None:
+                _send_cc(cc, _map_deg_to_cc(val, max_deg))
+    print("[motion] client disconnected")
+
+
 @app.route("/status")
 def api_status():
     return jsonify({
@@ -1426,12 +1602,21 @@ if __name__ == "__main__":
     except Exception:
         local_ip = "localhost"
 
+    ssl_context = None
+    if SSL_CERT_FILE and SSL_KEY_FILE and os.path.exists(SSL_CERT_FILE) and os.path.exists(SSL_KEY_FILE):
+        ssl_context = (SSL_CERT_FILE, SSL_KEY_FILE)
+    scheme = "https" if ssl_context else "http"
+
     print()
     print("─" * 54)
     print("  Lumix S5 Controller")
     print("─" * 54)
     print(f"  Camera IP  :  {CAMERA_IP}")
-    print(f"  iPhone URL :  http://{local_ip}:{PORT}")
+    print(f"  iPhone URL :  {scheme}://{local_ip}:{PORT}")
+    if ssl_context:
+        print(f"  HTTPS      :  ON  (cert: {SSL_CERT_FILE})")
+    else:
+        print(f"  HTTPS      :  OFF — Motion Control needs HTTPS (see SETUP.md)")
     print(f"  (Make sure Mac, iPhone, and camera are on the same WiFi)")
     print("─" * 54)
     print()
@@ -1444,4 +1629,4 @@ if __name__ == "__main__":
     from resolve_helper import install_resolve_scripts
     install_resolve_scripts(MEDIA_DIR)  # Workspace → Scripts → Utility, for Resolve Free
 
-    app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True, ssl_context=ssl_context)
